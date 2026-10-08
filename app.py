@@ -1,376 +1,189 @@
-import re
-from io import StringIO
-
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from collections import defaultdict
 
+st.set_page_config(page_title="研修アンケート分析ツール", layout="wide")
+plt.rcParams["font.sans-serif"] = ["Hiragino Sans", "YuGothic", "MS Gothic"]
+plt.rcParams["axes.unicode_minus"] = False
 
-ATTR_COLUMNS = ["部門", "職位", "性別", "年代", "採用区分"]
-NUMERIC_SCALE_MAP = {
-    "研修の必要度": {
-        "強く必要性を感じない": 1,
-        "あまり必要性を感じない": 2,
-        "なんともいえない": 3,
-        "必要性を感じる": 4,
-        "強く必要性を感じる": 5,
-    },
-    "研修内容のレベル": {
-        "非常にやさしい": 1,
-        "やさしい": 2,
-        "ちょうどいい": 3,
-        "難しい": 4,
-        "非常に難しい": 5,
-    },
-    "研修の有用度": {
-        "非常に役立たない": 1,
-        "あまり役立たない": 2,
-        "普通": 3,
-        "今後役立つものである": 4,
-        "非常に今後役立つものである": 5,
-    },
-    "研修時間": {
-        "非常に短い": 1,
-        "短い": 2,
-        "ちょうどいい": 3,
-        "長い": 4,
-        "非常に長い": 5,
-    },
-    "講師評価": {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5},
-    "研修の満足度": {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5},
-    "上司は重要な意思決定に自分を関与させてくれる": {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5},
-    "上司は部下の能力を伸ばしている": {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5},
-    "会社は社員の意見を十分に取り入れている": {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5},
-    "経営陣や上長に率直に発言できる": {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5},
-    "会社でのキャリアパスを描ける": {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5},
-    "会社に能力を伸ばす機会がある": {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5},
-}
+st.title("📊 研修アンケート分析ツール")
 
-QUESTION_ORDER = [
-    "研修の必要度",
-    "研修内容のレベル",
-    "研修の有用度",
-    "講師評価",
-    "研修時間",
-    "研修の満足度",
-    "上司は重要な意思決定に自分を関与させてくれる",
-    "上司は部下の能力を伸ばしている",
-    "会社は社員の意見を十分に取り入れている",
-    "経営陣や上長に率直に発言できる",
-    "会社でのキャリアパスを描ける",
-    "会社に能力を伸ばす機会がある",
-]
+uploaded = st.file_uploader("Excelファイルをアップロード", type=["xlsx", "xls", "csv"])
 
-POSITIVE_KEYWORDS = [
-    "良い", "改善", "スムーズ", "役立", "効果", "向上", "相談", "話せる", "整理",
-    "良くな", "安心", "受賞", "向き合", "納得", "信頼", "スピード", "速く", "増え",
-]
-NEGATIVE_KEYWORDS = [
-    "ない", "忙しい", "時間がない", "実践できない", "復習", "困難", "不足", "できなかった",
-    "難しい", "残念", "弱い", "つながら", "追われ", "重なり", "機会がなかった", "結果が出ない",
-]
-NEUTRAL_KEYWORDS = ["判断でき", "不明", "よくわからない", "判断しづらい", "今後", "可能性"]
-
-
-@st.cache_data
-def load_excel(file_obj):
-    df = pd.read_excel(file_obj, sheet_name="回答データ", dtype=str)
-    return df
-
-
-def normalize_df(df):
-    cleaned = df.copy()
-    cleaned = cleaned.replace({"nan": None, "NaN": None, "": None})
-    for col in cleaned.columns:
-        cleaned[col] = cleaned[col].apply(lambda x: str(x).strip() if isinstance(x, str) else x)
-    return cleaned
-
-
-def describe_attribute_distribution(df):
-    result = {}
-    for col in ATTR_COLUMNS:
-        if col not in df.columns:
-            continue
-        series = df[col].fillna("回答なし")
-        counts = series.value_counts().sort_index()
-        percentages = (counts / len(df) * 100).round(1)
-        result[col] = pd.DataFrame({"人数": counts.astype(int), "割合(%)": percentages.astype(float)})
-    return result
-
-
-def safe_numeric_mapping(series, mapping):
-    values = []
-    for v in series:
-        if pd.isna(v):
-            values.append(None)
+if uploaded:
+    try:
+        if uploaded.name.endswith(".csv"):
+            df = pd.read_csv(uploaded, sep="\t")
         else:
-            if str(v) in mapping:
-                values.append(mapping[str(v)])
-            else:
-                values.append(None)
-    return pd.Series(values)
+            xls = pd.ExcelFile(uploaded)
+            sheet = xls.sheet_names[0]
+            df = pd.read_excel(uploaded, sheet_name=sheet)
 
+        # ===== データの準備 =====
+        ATTRS = ["部門", "職位", "性別", "年代", "採用区分"]
+        SCALE5_ITEMS = ["講師評価", "研修の満足度", "活用結果の程度", "上司は重要な意思決定に自分を関与させてくれる", "上司は部下の能力を伸ばしている", "会社は社員の意見を十分に取り入れている", "経営陣や上長に率直に発言できる", "会社でのキャリアパスを描ける", "会社に能力を伸ばす機会がある"]
+        TEXT_ITEMS = ["結果の内容"]
 
-def summarize_question(df, question):
-    series = df[question].dropna()
-    if series.empty:
-        return {"question": question, "count": 0, "mean": None, "distribution": {}, "n": 0}
+        # ===== タブUI =====
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["全体サマリー", "設問別分析", "自由記述", "属性別分析", "レポート", "部門別"])
 
-    if question in NUMERIC_SCALE_MAP:
-        mapped = safe_numeric_mapping(series, NUMERIC_SCALE_MAP[question])
-        valid = mapped.dropna()
-        dist = series.value_counts().to_dict()
-        mean = round(float(valid.mean()), 2) if not valid.empty else None
-    else:
-        dist = series.value_counts().to_dict()
-        mean = None
+        # ===== TAB1: 全体サマリー =====
+        with tab1:
+            st.header("全体サマリー")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("回答者数", f"{len(df)}件")
+            with col2:
+                st.metric("総回答件数", f"{len(df) * len(SCALE5_ITEMS)}件")
+            
+            # 必要度平均
+            if "講師評価" in df.columns:
+                avg_eval = pd.to_numeric(df["講師評価"], errors="coerce").mean()
+                with col3:
+                    st.metric("講師評価平均", f"{avg_eval:.2f}", "5段階評価")
+            
+            # 満足度平均
+            if "研修の満足度" in df.columns:
+                avg_sat = pd.to_numeric(df["研修の満足度"], errors="coerce").mean()
+                with col4:
+                    st.metric("満足度平均", f"{avg_sat:.2f}", "5段階評価")
 
-    return {
-        "question": question,
-        "count": int(len(series)),
-        "mean": mean,
-        "distribution": dist,
-        "n": len(series),
-    }
+            # 活用率
+            if "研修内容の活用有無" in df.columns:
+                active = (df["研修内容の活用有無"] == "研修で学んだことを、活用した").sum()
+                rate = active / len(df) * 100
+                st.metric("活用率", f"{rate:.1f}%", f"{active}件/総数{len(df)}件")
 
+        # ===== TAB2: 設問別分析 =====
+        with tab2:
+            st.header("設問別分析")
+            for col in SCALE5_ITEMS:
+                if col not in df.columns:
+                    continue
+                st.subheader(col)
+                s = pd.to_numeric(df[col], errors="coerce").dropna()
+                if s.empty:
+                    continue
 
-def summarize_freetext(df):
-    texts = df.get("結果の内容", pd.Series([None] * len(df)))
-    records = []
-    for idx, text in texts.items():
-        if pd.isna(text) or str(text).strip() == "":
-            continue
-        text_str = str(text)
-        pos = any(k in text_str for k in POSITIVE_KEYWORDS)
-        neg = any(k in text_str for k in NEGATIVE_KEYWORDS)
-        neutral = any(k in text_str for k in NEUTRAL_KEYWORDS)
-        labels = []
-        if pos:
-            labels.append("ポジティブ")
-        if neg:
-            labels.append("ネガティブ")
-        if neutral:
-            labels.append("ニュートラル")
-        if not labels:
-            labels.append("ニュートラル")
-        records.append({"index": idx, "text": text_str, "labels": labels})
+                col1, col2, col3, col4 = st.columns(4)
+                with col1: st.metric("平均", f"{s.mean():.2f}")
+                with col2: st.metric("回答数", len(s))
+                with col3: st.metric("中央値", f"{s.median():.2f}")
+                with col4: st.metric("最大値", f"{s.max():.0f}")
 
-    result = {"ポジティブ": 0, "ネガティブ": 0, "ニュートラル": 0, "items": records}
-    for rec in records:
-        for label in rec["labels"]:
-            result[label] += 1
-    return result
+                vc = s.value_counts().sort_index()
+                fig, ax = plt.subplots(figsize=(8, 4))
+                vc.plot(kind="bar", ax=ax, color="#4C78A8")
+                ax.set_title(col)
+                ax.set_ylabel("人数")
+                st.pyplot(fig)
 
+        # ===== TAB3: 自由記述 =====
+        with tab3:
+            st.header("自由記述分析")
+            for col in TEXT_ITEMS:
+                if col not in df.columns:
+                    continue
+                st.subheader(col)
+                texts = df[col].dropna().astype(str).tolist()
+                if not texts:
+                    st.info("データなし")
+                    continue
 
-def render_kpi_card(title, value, subtitle, accent="#4f46e5"):
-    st.markdown(
-        f"""
-        <div style="background: linear-gradient(135deg, #f8f9ff 0%, #eef2ff 100%); border: 1px solid #e5e7eb; border-left: 6px solid {accent}; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.03);">
-            <div style="font-size: 12px; color: #4b5563; font-weight: 700;">{title}</div>
-            <div style="font-size: 28px; font-weight: 800; color: #111827; margin-top: 8px;">{value}</div>
-            <div style="font-size: 12px; color: #6b7280; margin-top: 6px;">{subtitle}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+                pos_kw = ["よかった", "良かった", "役立った", "満足", "効果", "勉強", "理解", "楽しかった"]
+                neg_kw = ["不満", "改善", "難しい", "不十分", "困った", "問題", "残念", "わかりにくい"]
 
+                pos = sum(1 for t in texts if any(k in t for k in pos_kw))
+                neg = sum(1 for t in texts if any(k in t for k in neg_kw))
+                neu = len(texts) - pos - neg
 
-def build_markdown_report(df):
-    n = len(df)
-    attr_summary = describe_attribute_distribution(df)
+                col1, col2, col3 = st.columns(3)
+                with col1: st.metric("ポジティブ", f"{pos}件 ({pos/len(texts)*100:.1f}%)")
+                with col2: st.metric("ネガティブ", f"{neg}件 ({neg/len(texts)*100:.1f}%)")
+                with col3: st.metric("ニュートラル", f"{neu}件 ({neu/len(texts)*100:.1f}%)")
 
-    lines = []
-    lines.append("# アンケート分析レポート")
-    lines.append("")
-    lines.append(f"- 回答者数: {n}件")
-    lines.append("")
-    lines.append("## 1. 回答者属性")
-    for col, table in attr_summary.items():
-        lines.append(f"### {col}")
-        lines.append(table.to_string(index=True))
-        lines.append("")
+                st.write("**サンプルコメント:**")
+                for t in texts[:5]:
+                    if str(t).strip() and t != "自由記述":
+                        st.code(t)
 
-    lines.append("## 2. 主要設問の集計")
-    for q in QUESTION_ORDER:
-        if q not in df.columns:
-            continue
-        summary = summarize_question(df, q)
-        lines.append(f"### {q}")
-        lines.append(f"- 回答数: {summary['count']}件")
-        if summary["mean"] is not None:
-            lines.append(f"- 平均値: {summary['mean']}")
-        lines.append("- 分布:")
-        for key, value in sorted(summary["distribution"].items(), key=lambda x: x[0]):
-            lines.append(f"  - {key}: {value}件")
-        lines.append("")
+        # ===== TAB4: 属性別分析 =====
+        with tab4:
+            st.header("属性別クロス集計")
+            attr = st.selectbox("属性を選択", ATTRS)
+            if attr in df.columns:
+                for q in SCALE5_ITEMS[:5]:
+                    if q not in df.columns:
+                        continue
+                    temp = pd.DataFrame({
+                        "attr": df[attr].fillna("未回答").astype(str),
+                        "score": pd.to_numeric(df[q], errors="coerce")
+                    }).dropna()
+                    if temp.empty:
+                        continue
 
-    lines.append("## 3. 自由記述分析")
-    free = summarize_freetext(df)
-    total = max(1, len(free["items"]))
-    for label in ["ポジティブ", "ネガティブ", "ニュートラル"]:
-        count = free[label]
-        pct = round(count / total * 100, 1)
-        lines.append(f"- {label}: {count}件 ({pct}%)")
-    lines.append("")
-    for item in free["items"]:
-        lines.append(f"- 分類: {', '.join(item['labels'])}")
-        lines.append(f"- 原文: {item['text']}")
-        lines.append("")
+                    grouped = temp.groupby("attr")["score"].mean().sort_values(ascending=False)
+                    fig, ax = plt.subplots(figsize=(9, 5))
+                    grouped.plot(kind="bar", ax=ax, color="#F58518")
+                    ax.set_title(f"{q} / {attr}")
+                    ax.set_ylabel("平均値")
+                    plt.xticks(rotation=35, ha="right")
+                    st.pyplot(fig)
 
-    lines.append("## 4. 結論")
-    lines.append("- 研修の必要性は高い傾向にある。")
-    lines.append("- 内容の難易度は全体として適切であるが、実践の場や時間不足が課題。")
-    lines.append("- 自由記述では、コミュニケーション改善と併せて、業務忙しさによる活用の難しさが見られる。")
-    return "\n".join(lines)
+        # ===== TAB5: レポート =====
+        with tab5:
+            st.header("レポート")
+            means = []
+            for col in SCALE5_ITEMS:
+                if col in df.columns:
+                    s = pd.to_numeric(df[col], errors="coerce").dropna()
+                    if not s.empty:
+                        means.append((col, s.mean()))
 
+            means.sort(key=lambda x: x[1])
+            
+            st.write("**低評価項目（改善が必要）:**")
+            for col, avg in means[:3]:
+                st.write(f"- {col}: 平均 {avg:.2f}")
 
-def render_question_chart(df, question):
-    if question not in df.columns:
-        return
+            st.write("\n**改善提案:**")
+            st.write("1️⃣ 低評価項目の具体的な改善策を検討する")
+            st.write("2️⃣ 自由記述の課題コメントをテーマ別に分類する")
+            st.write("3️⃣ 高評価項目は継続・強化する")
 
-    if question in NUMERIC_SCALE_MAP:
-        dist = df[question].fillna("回答なし").value_counts().reindex(list(NUMERIC_SCALE_MAP[question].keys()), fill_value=0)
-    else:
-        dist = df[question].fillna("回答なし").value_counts()
-
-    st.bar_chart(dist)
-
-
-def apply_sidebar_filters(df):
-    with st.sidebar:
-        st.header("フィルタ")
-        filters = {}
-        for col in ATTR_COLUMNS:
-            if col not in df.columns:
-                continue
-            values = df[col].dropna().unique().tolist()
-            options = sorted({str(v) for v in values if str(v).strip() != ""})
-            if not options:
-                continue
-            selected = st.multiselect(f"{col}", options=options, default=options)
-            if selected:
-                filters[col] = selected
-
-        st.caption("分析対象を絞り込みます。")
-        return df, filters
-
-
-st.set_page_config(page_title="研修アンケート分析ツール", page_icon="📊", layout="wide")
-st.title("研修アンケート分析ツール")
-
-uploaded = st.sidebar.file_uploader("Excelファイルをアップロード", type=["xlsx", "xls"])
-
-if uploaded is not None:
-    with st.spinner("データを読み込んでいます..."):
-        raw_df = load_excel(uploaded)
-        df = normalize_df(raw_df)
-
-    filtered_df, filters = apply_sidebar_filters(df)
-    for col, values in filters.items():
-        filtered_df = filtered_df[filtered_df[col].isin(values)]
-
-    if filtered_df.empty:
-        st.warning("現在のフィルタ条件に一致するデータがありません。条件を見直してください。")
-        st.stop()
-
-    st.success(f"{len(filtered_df)}件の回答データを表示中（全{len(df)}件）")
-
-    q_need = summarize_question(filtered_df, "研修の必要度")
-    q_sat = summarize_question(filtered_df, "研修の満足度")
-    q_use = summarize_question(filtered_df, "研修の有用度")
-    active = filtered_df["研修内容の活用有無"].fillna("").str.contains("活用した", na=False).sum()
-    used_rate = (active / len(filtered_df)) * 100 if len(filtered_df) else 0
-
-    st.subheader("全体サマリー")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1:
-        render_kpi_card("回答者数", f"{len(filtered_df)}件", "総回答件数", "#4f46e5")
-    with c2:
-        render_kpi_card("必要度平均", f"{q_need['mean']:.2f}", "5段階評価", "#2563eb")
-    with c3:
-        render_kpi_card("満足度平均", f"{q_sat['mean']:.2f}", "5段階評価", "#10b981")
-    with c4:
-        render_kpi_card("活用率", f"{used_rate:.1f}%", f"{active}件/総数", "#f59e0b")
-
-    tabs = st.tabs(["概要", "設問別", "自由記述", "レポート"])
-
-    with tabs[0]:
-        attr_summary = describe_attribute_distribution(filtered_df)
-        for col_name, table in attr_summary.items():
-            st.markdown(f"### {col_name}")
-            st.dataframe(table, use_container_width=True)
-
-    with tabs[1]:
-        cols = st.columns(3)
-        for idx, q in enumerate(QUESTION_ORDER):
-            if q not in filtered_df.columns:
-                continue
-            summary = summarize_question(filtered_df, q)
-            with cols[idx % 3]:
-                st.markdown(f"### {q}")
-                if summary["mean"] is not None:
-                    st.metric("平均値", f"{summary['mean']:.2f}")
+            if means:
+                overall = np.mean([m[1] for m in means])
+                if overall >= 4.0:
+                    eval_text = "🟢 良好"
+                elif overall >= 3.0:
+                    eval_text = "🟡 概ね良好"
                 else:
-                    st.metric("回答数", f"{summary['count']}件")
-                dist_df = pd.DataFrame({"回答": list(summary['distribution'].keys()), "件数": list(summary['distribution'].values())})
-                st.dataframe(dist_df, use_container_width=True, hide_index=True)
-                render_question_chart(filtered_df, q)
-                st.markdown("---")
+                    eval_text = "🔴 改善要"
+                st.write(f"\n**総合評価: {eval_text}**")
+                st.write(f"全体平均: {overall:.2f}")
 
-    with tabs[2]:
-        free = summarize_freetext(filtered_df)
-        total_texts = len(free["items"])
-        if total_texts == 0:
-            st.info("自由記述はありません。")
-        else:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                render_kpi_card("ポジティブ", f"{free['ポジティブ']}件", "良かった点・効果", "#10b981")
-            with c2:
-                render_kpi_card("ネガティブ", f"{free['ネガティブ']}件", "課題・改善要望", "#ef4444")
-            with c3:
-                render_kpi_card("ニュートラル", f"{free['ニュートラル']}件", "中立的な意見", "#6b7280")
+        # ===== TAB6: 部門別 =====
+        with tab6:
+            st.header("部門別分析")
+            if "部門" in df.columns:
+                depts = df["部門"].unique()
+                for dept in depts:
+                    st.subheader(f"部門: {dept}")
+                    dept_df = df[df["部門"] == dept]
+                    st.write(f"回答数: {len(dept_df)}件")
+                    
+                    for col in SCALE5_ITEMS[:3]:
+                        if col in df.columns:
+                            s = pd.to_numeric(dept_df[col], errors="coerce").dropna()
+                            if not s.empty:
+                                st.write(f"- {col}: 平均 {s.mean():.2f}")
 
-            pos_items = [it for it in free["items"] if "ポジティブ" in it["labels"]]
-            neg_items = [it for it in free["items"] if "ネガティブ" in it["labels"]]
-            neutral_items = [it for it in free["items"] if "ニュートラル" in it["labels"] and "ポジティブ" not in it["labels"] and "ネガティブ" not in it["labels"]]
+        st.success("✅ 分析完了")
 
-            left_col, mid_col, right_col = st.columns(3)
-
-            def render_category_box(column, title, items, accent):
-                with column:
-                    st.markdown(
-                        f"<div style='padding:12px 14px; background:#f9fafb; border:1px solid #e5e7eb; border-left:6px solid {accent}; border-radius:12px; margin-bottom:12px;'><h3 style='margin:0 0 8px 0;'>{title}</h3></div>",
-                        unsafe_allow_html=True,
-                    )
-                    if not items:
-                        st.info("該当なし")
-                        return
-                    for idx, item in enumerate(items, 1):
-                        st.markdown(
-                            f"""
-                            <div style="border:1px solid #dfe3ee; background:#ffffff; border-radius:10px; padding:12px 14px; margin-bottom:10px;">
-                                <div style="font-size:11px; color:#6b7280; font-weight:700; margin-bottom:6px;">{title} {idx}</div>
-                                <div style="font-size:14px; line-height:1.7; color:#111827;">{item['text']}</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-
-            render_category_box(left_col, "ポジティブ", pos_items, "#10b981")
-            render_category_box(mid_col, "ネガティブ", neg_items, "#ef4444")
-            render_category_box(right_col, "ニュートラル", neutral_items, "#6b7280")
-
-    with tabs[3]:
-        markdown_report = build_markdown_report(filtered_df)
-        st.markdown("### レポートプレビュー")
-        st.download_button(
-            label="Markdown形式でダウンロード",
-            data=markdown_report,
-            file_name="survey_analysis_report.md",
-            mime="text/markdown",
-        )
-        st.markdown(markdown_report)
-
-else:
-    st.info("Excelファイルをアップロードしてください。")
-    st.caption("アップロード後、サイドバーで属性条件を絞り込み、各タブで結果を確認できます。")
+    except Exception as e:
+        st.error(f"エラー: {e}")
+        import traceback
+        st.code(traceback.format_exc())
